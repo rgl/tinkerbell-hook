@@ -1,0 +1,105 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /var/run/promtail/positions.yaml
+
+clients:
+  - url: '@@loki_push_url@@'
+
+# NB you can manually test this with ./promtail-dry-run/run.sh.
+# NB loki has an hard requirement, it refuses to receive out-of-order log lines
+#    for the same series/stream. when that happens, you will see an error
+#    alike:
+#
+#       level=error ts=2021-06-14T15:12:53.275044479Z caller=client.go:334
+#       component=client host=10.3.0.2:3100 msg="final error sending batch"
+#       status=400 error="server returned HTTP status 400 Bad Request (400):
+#       entry with timestamp 2021-06-14 15:12:52 +0000 UTC ignored, reason:
+#       'entry out of order' for stream: {host=\"linuxkit\", job=\"logwrite\",
+#       source=\"docker\"},"
+#
+#    this can happen when you try to parse the time from the log, but the log
+#    does not have the expected format (e.g. because when the application
+#    crashes, it writes a crash dump instead of the normal log or it has some
+#    rogue output in the middle of some code path). either fix the application
+#    or do not parse its output, just let loki set the log time. both of these
+#    happen with our the tink-docker container logs.
+#
+#    this can happen when your are trying to merge logs from different sources
+#    into a single loki series. you must add another label to differentiate the
+#    two.
+#
+#    see https://github.com/owen-d/loki/blob/main/docs/sources/design-documents/2021-01-Ordering-Constraint-Removal.md
+scrape_configs:
+  - job_name: logwrite
+    static_configs:
+      - labels:
+          __path__: /host/var/log/*.log
+          job: logwrite
+          # TODO get this from the actual machine name as set by dhcp?
+          host: linuxkit
+    pipeline_stages:
+      - labeldrop:
+          - filename
+      - regex:
+          # NB this time refers to the time memlogd ingested the message.
+          expression: '^(?P<time>\S+?) ((?P<type>onboot)\.\d+-)?(?P<source>\S+?)(\.(?P<stream>\S+?))? (?P<content>.*)$'
+      - labels:
+          source:
+          stream:
+      - timestamp:
+          source: time
+          format: RFC3339
+      - output:
+          source: content
+      # further parse the kmsg log to extract the time and multiline content.
+      - match:
+          selector: '{source="kmsg"}'
+          stages:
+            - multiline:
+                firstline: '^\(\d+\) - (?P<time>\S+?): '
+            - regex:
+                expression: '(?s)^\(\d+\) - (?P<time>\S+?): (?P<content>.*)'
+            - timestamp:
+                source: time
+                format: RFC3339Nano
+            - output:
+                source: content
+      # NB do not try to further extract the time from the docker source log;
+      #    our tink-docker container output is not normalized. there is rogue
+      #    output when we install the plugin and when docker crashes.
+      #- match:
+      #    selector: '{source="docker"}'
+      #    stages:
+      #      - regex:
+      #          expression: '^time="(?P<time>\S+?)" (?P<content>.*)$'
+      #      - timestamp:
+      #          source: time
+      #          format: RFC3339Nano
+      #      - output:
+      #          source: content
+  - job_name: containerd
+    static_configs:
+      - labels:
+          __path__: /host/var/log/*.log.txt
+          job: containerd
+          source: containerd
+          # TODO get this from the actual machine name as set by dhcp?
+          host: linuxkit
+    pipeline_stages:
+      - regex:
+          source: filename
+          expression: '(\.(?P<stream>\S+?))?\.log\.txt$'
+      - labels:
+          stream:
+      - labeldrop:
+          - filename
+      - regex:
+          expression: '^time="(?P<time>\S+?)" (?P<content>.*)$'
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+      - output:
+          source: content

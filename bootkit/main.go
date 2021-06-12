@@ -43,9 +43,8 @@ type tinkConfig struct {
 func main() {
 	fmt.Println("Starting BootKit")
 
-	// // Read entire file content, giving us little control but
-	// // making it very simple. No need to close the file.
-
+	// Read entire file content, giving us little control but
+	// making it very simple. No need to close the file.
 	content, err := ioutil.ReadFile("/proc/cmdline")
 	if err != nil {
 		panic(err)
@@ -76,8 +75,7 @@ func main() {
 			fmt.Sprintf("ID=%s", cfg.workerID),
 			fmt.Sprintf("container_uuid=%s", cfg.MetadataID),
 		},
-		AttachStdout: true,
-		AttachStderr: true,
+		Labels: map[string]string{"worker_id": cfg.workerID},
 	}
 
 	tinkHostConfig := &container.HostConfig{
@@ -113,11 +111,6 @@ func main() {
 		RegistryAuth: authStr,
 	}
 
-	// Give time to Docker to start
-	// Alternatively we watch for the socket being created
-	time.Sleep(time.Second * 3)
-	fmt.Println("Starting Communication with Docker Engine")
-
 	// Create Docker client with API (socket)
 	ctx := context.Background()
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -125,7 +118,21 @@ func main() {
 		panic(err)
 	}
 
-	fmt.Printf("Pulling image [%s]", imageName)
+	// Wait for docker to be ready.
+	fmt.Println("Waiting for docker to be ready")
+	for {
+		_, err := cli.Ping(ctx)
+		if err != nil {
+			if client.IsErrConnectionFailed(err) {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			panic(err)
+		}
+		break
+	}
+
+	fmt.Printf("Pulling image [%s]\n", imageName)
 
 	out, err := cli.ImagePull(ctx, imageName, pullOpts)
 	if err != nil {
@@ -137,7 +144,7 @@ func main() {
 		panic(err)
 	}
 
-	resp, err := cli.ContainerCreate(ctx, tinkContainer, tinkHostConfig, nil, nil, "")
+	resp, err := cli.ContainerCreate(ctx, tinkContainer, tinkHostConfig, nil, nil, "tink-worker")
 	if err != nil {
 		panic(err)
 	}
